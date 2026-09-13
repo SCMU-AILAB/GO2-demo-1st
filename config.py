@@ -15,13 +15,13 @@ class DemoConfig:
 
     # 视觉伺服参数
     center_deadband: float = 0.15    # 画面中心死区 [-1, 1]
-    arrive_area_ratio: float = 0.15  # bbox 面积 / 画面面积，超过则认为到达
-    near_area_ratio: float = 0.10    # 开始减速的面积比例（0.05 太小，远距离就触发减速了）
+    arrive_area_ratio: float = 0.10  # 到达判定（0.15 太高，锥桶是细长的，面积增长慢）
+    near_area_ratio: float = 0.08    # 开始减速的面积比例
     vision_expiry: float = 0.5       # 视觉结果有效期（秒），过期后运动线程自动停车
 
     # 速度限制
-    normal_speed: float = 0.40       # m/s（原来 0.20 太慢）
-    slow_speed: float = 0.15         # m/s（原来 0.08 太慢）
+    normal_speed: float = 0.40       # m/s
+    slow_speed: float = 0.20         # m/s（0.15 太慢，走不动）
     turn_speed: float = 0.30         # rad/s
     scan_speed: float = 0.20         # 原地扫描转速
 
