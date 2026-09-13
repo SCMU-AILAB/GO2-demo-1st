@@ -210,58 +210,72 @@ class ConeDemo:
         """视觉伺服走向锥桶，直到足够近。
 
         双线程架构：
-            运动线程（50Hz）：持续发 move()，不等视觉
-            视觉线程（慢）：  拍照 → YOLO → 更新速度/转向
+            运动线程（50Hz）：持续发 move()，独立检查视觉有效期
+            视觉线程（慢）：  拍照 → YOLO → 更新速度/转向 + 时间戳
+
+        视觉有效期机制：
+            成功检测时刷新 last_seen 时间戳
+            单次失败不清零、不刷新，短暂复用上次指令
+            运动线程发现超过有效期（默认 0.5 秒）立即停车
 
         返回：
             True  = 已到达锥桶前方
-            False = 超时或丢失目标
+            False = 超时或视觉结果过期
         """
         logger.info("走向锥桶...")
 
+        # 视觉有效期：正常更新间隔约 70-100ms（拍照 35ms + YOLO 32ms）
+        # 默认 0.5 秒 = 5 倍余量；0.20m/s 下约多走 10cm，留有制动距离
+        vision_expiry = self.config.vision_expiry
+
         # 共享变量：视觉线程写，运动线程读
-        # 用 dict 是因为 dict 的单个 key 赋值是原子的，不需要额外加锁
-        cmd = {"vx": 0.0, "vyaw": 0.0, "running": True}
+        cmd = {
+            "vx": 0.0,
+            "vyaw": 0.0,
+            "running": True,
+            "last_seen": time.monotonic(),  # 最后一次成功检测的时间戳
+        }
 
         def motion_loop():
-            """运动线程：以 50Hz 持续发送 move 指令。"""
+            """运动线程：50Hz 发 move，独立检查视觉有效期。"""
             while cmd["running"]:
-                self.nav.move(cmd["vx"], 0.0, cmd["vyaw"])
-                time.sleep(0.02)   # 50Hz
+                # 有效期检查：即使视觉线程卡死，这里也能停车
+                if time.monotonic() - cmd["last_seen"] > vision_expiry:
+                    logger.warning("视觉结果过期 (%.1fs 未更新)，停车", vision_expiry)
+                    self.nav.move(0.0, 0.0, 0.0)
+                else:
+                    self.nav.move(cmd["vx"], 0.0, cmd["vyaw"])
+                time.sleep(0.02)
 
-        # 启动运动线程（daemon=True：主线程退出时自动结束）
         motion_thread = threading.Thread(target=motion_loop, daemon=True)
         motion_thread.start()
 
         deadline = time.monotonic() + timeout
         try:
             while time.monotonic() < deadline:
-                # ── Step 1: 拍照检测（可能 32ms~几百ms，运动线程不受影响）──
+                # ── Step 1: 拍照检测 ──
                 det, w, h = self._find_cone_in_frame()
 
-                # ── Step 2: 丢失目标处理 ──
-                lost_count = 0
-                while det is None and lost_count < 5:
-                    lost_count += 1
-                    logger.warning("锥桶丢失 (第 %d 次)", lost_count)
-                    cmd["vx"] = 0.0      # 停住，运动线程会发 stop
-                    cmd["vyaw"] = 0.0
-                    time.sleep(0.3)
-                    det, w, h = self._find_cone_in_frame()
+                # ── Step 2: 检测失败 → 保持上次指令，不清零 ──
+                # 时间戳不刷新，运动线程会在过期后自动停车
                 if det is None:
-                    logger.warning("锥桶连续丢失 5 次，放弃")
-                    return False
+                    logger.debug("检测失败，沿用上次指令")
+                    time.sleep(0.1)
+                    continue
 
-                # ── Step 3: 计算两个关键指标 ──
+                # ── Step 3: 检测成功 → 刷新时间戳 ──
+                cmd["last_seen"] = time.monotonic()
+
+                # ── Step 4: 计算指标 ──
                 area_ratio = det.area / max(1.0, w * h)
                 offset = det.offset_x_ratio(w)
 
-                # ── Step 4: 到达判定 ──
+                # ── Step 5: 到达判定 ──
                 if area_ratio >= self.config.arrive_area_ratio:
                     logger.info("已到达锥桶前方 (area_ratio=%.3f)", area_ratio)
                     return True
 
-                # ── Step 5: 计算速度和转向，写入共享变量 ──
+                # ── Step 6: 计算速度和转向，写入共享变量 ──
                 speed = self.config.normal_speed
                 if area_ratio >= self.config.near_area_ratio:
                     speed = self.config.slow_speed
@@ -270,7 +284,6 @@ class ConeDemo:
                 if abs(offset) > self.config.center_deadband:
                     turn = -math.copysign(self.config.turn_speed, offset)
 
-                # 写入共享变量，运动线程下一次循环（≤20ms后）就会用上
                 cmd["vx"] = speed
                 cmd["vyaw"] = turn
 
