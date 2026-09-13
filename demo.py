@@ -389,6 +389,12 @@ class ConeDemo:
                 return 1
             time.sleep(3.0)   # 起立需要时间，别急着走
 
+            # 起立后进入平衡站立模式，否则不接受移动指令
+            logger.info("=== 平衡站立 ===")
+            if not self.nav.balance_stand():
+                logger.warning("balance_stand 返回失败，继续尝试")
+            time.sleep(1.0)
+
             # ── Phase 2: 找锥桶 A 并走过去 ──
             # 画面里已经有两个锥桶，选最靠左的走过去
             logger.info("=== 第一个锥桶 ===")

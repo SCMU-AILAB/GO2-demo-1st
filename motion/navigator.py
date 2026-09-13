@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import time
+
+logger = logging.getLogger(__name__)
 
 
 class Go2Navigator:
@@ -47,7 +50,10 @@ class Go2Navigator:
         """发送速度指令。vx 前进 m/s，vy 左移 m/s，vyaw 左转 rad/s。"""
         if self._client is None:
             return False
-        return self._client.move(vx, vy, vyaw) == 0
+        code = self._client.move(vx, vy, vyaw)
+        if code != 0:
+            logger.warning("move 失败: code=%d vx=%.2f vy=%.2f vyaw=%.2f", code, vx, vy, vyaw)
+        return code == 0
 
     def move_for(self, vx: float, vy: float, vyaw: float, seconds: float) -> None:
         """持续发送速度指令一段时间，然后停止。"""
