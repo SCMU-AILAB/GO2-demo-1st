@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse      # 命令行参数解析
 import logging       # 日志输出，替代 print
 import math          # 数学函数：atan2、hypot、copysign 等
+import threading     # 多线程：运动控制和视觉检测分开跑
 import time          # 时间相关：sleep、monotonic
 from enum import Enum
 
@@ -208,74 +209,77 @@ class ConeDemo:
     def approach_cone(self, timeout: float = 20.0) -> bool:
         """视觉伺服走向锥桶，直到足够近。
 
-        原理（每 0.05 秒一个控制周期）：
-            1. 拍照检测
-            2. 看 bbox 面积占比 —— 面积越大说明越近
-            3. 看 bbox 中心偏移 —— 偏左就左转，偏右就右转
-            4. 面积够大 → 到达，停
+        双线程架构：
+            运动线程（50Hz）：持续发 move()，不等视觉
+            视觉线程（慢）：  拍照 → YOLO → 更新速度/转向
 
         返回：
             True  = 已到达锥桶前方
             False = 超时或丢失目标
         """
         logger.info("走向锥桶...")
+
+        # 共享变量：视觉线程写，运动线程读
+        # 用 dict 是因为 dict 的单个 key 赋值是原子的，不需要额外加锁
+        cmd = {"vx": 0.0, "vyaw": 0.0, "running": True}
+
+        def motion_loop():
+            """运动线程：以 50Hz 持续发送 move 指令。"""
+            while cmd["running"]:
+                self.nav.move(cmd["vx"], 0.0, cmd["vyaw"])
+                time.sleep(0.02)   # 50Hz
+
+        # 启动运动线程（daemon=True：主线程退出时自动结束）
+        motion_thread = threading.Thread(target=motion_loop, daemon=True)
+        motion_thread.start()
+
         deadline = time.monotonic() + timeout
-
-        while time.monotonic() < deadline:
-            # ── Step 1: 拍照检测 ──
-            det, w, h = self._find_cone_in_frame()
-
-            # ── Step 2: 丢失目标处理 ──
-            # 刚丢失可能是遮挡/抖动/JPEG损坏，停一下多试几次
-            lost_count = 0
-            while det is None and lost_count < 5:
-                lost_count += 1
-                logger.warning("锥桶丢失 (第 %d 次)", lost_count)
-                self.nav.stop()
-                time.sleep(0.3)
+        try:
+            while time.monotonic() < deadline:
+                # ── Step 1: 拍照检测（可能 32ms~几百ms，运动线程不受影响）──
                 det, w, h = self._find_cone_in_frame()
-            if det is None:
-                logger.warning("锥桶连续丢失 5 次，放弃")
-                return False
 
-            # ── Step 3: 计算两个关键指标 ──
-            # area_ratio: bbox 面积 / 画面面积，范围 [0, 1]
-            #   越大 = 锥桶在画面里占比越大 = 越近
-            area_ratio = det.area / max(1.0, w * h)
+                # ── Step 2: 丢失目标处理 ──
+                lost_count = 0
+                while det is None and lost_count < 5:
+                    lost_count += 1
+                    logger.warning("锥桶丢失 (第 %d 次)", lost_count)
+                    cmd["vx"] = 0.0      # 停住，运动线程会发 stop
+                    cmd["vyaw"] = 0.0
+                    time.sleep(0.3)
+                    det, w, h = self._find_cone_in_frame()
+                if det is None:
+                    logger.warning("锥桶连续丢失 5 次，放弃")
+                    return False
 
-            # offset: 锥桶中心相对画面中心的水平偏移
-            #   范围 [-1, 1]，-1 = 最左边，+1 = 最右边，0 = 正中间
-            offset = det.offset_x_ratio(w)
+                # ── Step 3: 计算两个关键指标 ──
+                area_ratio = det.area / max(1.0, w * h)
+                offset = det.offset_x_ratio(w)
 
-            # ── Step 4: 到达判定 ──
-            # 面积占比超过阈值（默认 0.15 = 15%），说明已经很近了
-            if area_ratio >= self.config.arrive_area_ratio:
-                logger.info("已到达锥桶前方 (area_ratio=%.3f)", area_ratio)
-                self.nav.stop()
-                return True
+                # ── Step 4: 到达判定 ──
+                if area_ratio >= self.config.arrive_area_ratio:
+                    logger.info("已到达锥桶前方 (area_ratio=%.3f)", area_ratio)
+                    return True
 
-            # ── Step 5: 计算速度和转向 ──
-            # 默认全速，快到了就减速
-            speed = self.config.normal_speed
-            if area_ratio >= self.config.near_area_ratio:
-                speed = self.config.slow_speed    # 接近时减速，防止撞上
+                # ── Step 5: 计算速度和转向，写入共享变量 ──
+                speed = self.config.normal_speed
+                if area_ratio >= self.config.near_area_ratio:
+                    speed = self.config.slow_speed
 
-            # 转向：锥桶偏左 → 左转（正 vyaw），偏右 → 右转（负 vyaw）
-            # deadband 是死区，中心附近不转向，防止左右摇摆
-            turn = 0.0
-            if abs(offset) > self.config.center_deadband:
-                # copysign(magnitude, sign)：取 turn_speed 的大小，offset 的符号
-                # offset > 0（偏右）→ turn 为负（右转）
-                # offset < 0（偏左）→ turn 为正（左转）
-                turn = -math.copysign(self.config.turn_speed, offset)
+                turn = 0.0
+                if abs(offset) > self.config.center_deadband:
+                    turn = -math.copysign(self.config.turn_speed, offset)
 
-            # ── Step 6: 发送速度指令 ──
-            # move(vx=前进速度, vy=0(不横移), vyaw=转向速度)
-            self.nav.move(speed, 0.0, turn)
-            time.sleep(0.05)      # 50ms 一个控制周期，约 20Hz
+                # 写入共享变量，运动线程下一次循环（≤20ms后）就会用上
+                cmd["vx"] = speed
+                cmd["vyaw"] = turn
 
-        # 超时
-        self.nav.stop()
+        finally:
+            # 通知运动线程退出
+            cmd["running"] = False
+            motion_thread.join(timeout=1.0)
+            self.nav.stop()
+
         logger.warning("接近锥桶超时")
         return False
 
