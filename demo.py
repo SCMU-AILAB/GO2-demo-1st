@@ -238,13 +238,19 @@ class ConeDemo:
 
         def motion_loop():
             """运动线程：50Hz 发 move，独立检查视觉有效期。"""
+            first_cmd_logged = False
             while cmd["running"]:
                 # 有效期检查：即使视觉线程卡死，这里也能停车
                 if time.monotonic() - cmd["last_seen"] > vision_expiry:
                     logger.warning("视觉结果过期 (%.1fs 未更新)，停车", vision_expiry)
                     self.nav.move(0.0, 0.0, 0.0)
                 else:
-                    self.nav.move(cmd["vx"], 0.0, cmd["vyaw"])
+                    vx = cmd["vx"]
+                    vyaw = cmd["vyaw"]
+                    if not first_cmd_logged and (vx != 0.0 or vyaw != 0.0):
+                        logger.info("运动线程首次非零指令: vx=%.2f vyaw=%.2f", vx, vyaw)
+                        first_cmd_logged = True
+                    self.nav.move(vx, 0.0, vyaw)
                 time.sleep(0.02)
 
         motion_thread = threading.Thread(target=motion_loop, daemon=True)
@@ -269,6 +275,8 @@ class ConeDemo:
                 # ── Step 4: 计算指标 ──
                 area_ratio = det.area / max(1.0, w * h)
                 offset = det.offset_x_ratio(w)
+                logger.info("检测成功: conf=%.2f center_x=%.0f area_ratio=%.3f offset=%.2f frame=%dx%d",
+                            det.confidence, det.center_x, area_ratio, offset, w, h)
 
                 # ── Step 5: 到达判定 ──
                 if area_ratio >= self.config.arrive_area_ratio:
@@ -286,6 +294,8 @@ class ConeDemo:
 
                 cmd["vx"] = speed
                 cmd["vyaw"] = turn
+
+                logger.info("指令: vx=%.2f vyaw=%.2f", speed, turn)
 
         finally:
             # 通知运动线程退出
