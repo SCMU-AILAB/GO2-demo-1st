@@ -226,14 +226,17 @@ class ConeDemo:
             det, w, h = self._find_cone_in_frame()
 
             # ── Step 2: 丢失目标处理 ──
-            # 刚丢失可能是遮挡/抖动，停一下再试一次
-            if det is None:
+            # 刚丢失可能是遮挡/抖动/JPEG损坏，停一下多试几次
+            lost_count = 0
+            while det is None and lost_count < 5:
+                lost_count += 1
+                logger.warning("锥桶丢失 (第 %d 次)", lost_count)
                 self.nav.stop()
-                time.sleep(0.3)                          # 等 0.3 秒
-                det, w, h = self._find_cone_in_frame()   # 再试一次
-                if det is None:
-                    logger.warning("锥桶丢失")           # 连续两次都没有，真的丢了
-                    return False
+                time.sleep(0.3)
+                det, w, h = self._find_cone_in_frame()
+            if det is None:
+                logger.warning("锥桶连续丢失 5 次，放弃")
+                return False
 
             # ── Step 3: 计算两个关键指标 ──
             # area_ratio: bbox 面积 / 画面面积，范围 [0, 1]
