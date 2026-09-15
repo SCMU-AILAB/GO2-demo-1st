@@ -16,6 +16,7 @@ class Go2Lidar:
         self._subscriber = None
         self._lock = threading.Lock()
         self._front_distance: float | None = None
+        self._last_update: float = 0.0
         self._got_first = threading.Event()
 
     def start(self) -> None:
@@ -35,31 +36,30 @@ class Go2Lidar:
                 y = xyz[:, 1]
                 z = xyz[:, 2]
 
-                # 径向距离：排除 LiDAR 附近的身体结构
-                radial = np.sqrt(x**2 + y**2 + z**2)
-
-                # 前方真实障碍物：
-                #   radial > 0.25 — 排除紧贴 LiDAR 的身体点（头/支架）
-                #   x > 0.1      — 前方（放宽，允许 0.15m 近距离检测）
-                #   |y| < 0.4    — 大致正前方锥形
-                #   z > -0.1     — 排除 LiDAR 下方的地面和腿（LiDAR 在头顶，腿在 z<0）
-                #   z < 0.5      — 排除过高点
+                # 前方障碍物过滤：
+                #   水平距离 sqrt(x²+y²) > 0.15 — 排除紧贴 LiDAR 的安装结构
+                #   x > 0.1                     — 前方
+                #   |y| < 0.5                   — 正前方锥形（放宽）
+                #   z > -0.6                    — 允许地面附近的锥桶（LiDAR 在头顶，锥桶在下方）
+                #   z < 0.5                     — 排除过高点
+                h_dist = np.sqrt(x**2 + y**2)
                 mask = (
-                    (radial > 0.25)
+                    (h_dist > 0.15)
                     & (x > 0.1)
-                    & (np.abs(y) < 0.4)
-                    & (z > -0.1)
+                    & (np.abs(y) < 0.5)
+                    & (z > -0.6)
                     & (z < 0.5)
                 )
                 if not np.any(mask):
                     with self._lock:
                         self._front_distance = None
+                        self._last_update = time.monotonic()
                     self._got_first.set()
                     return
 
-                dist = np.sqrt(x[mask] ** 2 + y[mask] ** 2)
                 with self._lock:
-                    self._front_distance = float(np.min(dist))
+                    self._front_distance = float(np.min(h_dist[mask]))
+                    self._last_update = time.monotonic()
                 self._got_first.set()
             except Exception:
                 pass
@@ -73,9 +73,15 @@ class Go2Lidar:
         """等待收到第一帧点云。"""
         return self._got_first.wait(timeout)
 
-    def get_front_distance(self) -> float | None:
-        """返回前方最近障碍物距离（米）；无障碍或无数据返回 None。"""
+    def get_front_distance(self, max_age: float = 0.5) -> float | None:
+        """返回前方最近障碍物距离（米）。
+
+        数据超过 max_age 秒未更新则返回 None（视为失效）。
+        过滤后无点也返回 None。
+        """
         with self._lock:
+            if time.monotonic() - self._last_update > max_age:
+                return None
             return self._front_distance
 
     def stop(self) -> None:

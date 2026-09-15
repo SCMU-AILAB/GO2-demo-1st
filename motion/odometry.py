@@ -22,6 +22,7 @@ class Go2Odometry:
         self._subscriber = None
         self._lock = threading.Lock()
         self._pose = Pose2D(0.0, 0.0, 0.0)
+        self._last_update: float = 0.0
         self._got_first = threading.Event()
 
     def start(self) -> None:
@@ -42,6 +43,7 @@ class Go2Odometry:
                         y=float(pos[1]),
                         yaw=float(rpy[2]),  # yaw
                     )
+                    self._last_update = time.monotonic()
                 self._got_first.set()
             except Exception:
                 pass
@@ -59,6 +61,11 @@ class Go2Odometry:
         """获取当前位姿。"""
         with self._lock:
             return self._pose
+
+    def is_fresh(self, max_age: float = 1.0) -> bool:
+        """数据是否在 max_age 秒内更新过。"""
+        with self._lock:
+            return time.monotonic() - self._last_update < max_age
 
     def stop(self) -> None:
         """关闭订阅并释放 DDS。"""

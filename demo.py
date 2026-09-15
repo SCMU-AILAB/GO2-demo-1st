@@ -300,23 +300,27 @@ class ConeDemo:
                 logger.info("检测: conf=%.2f center_x=%.0f area_ratio=%.3f offset=%.2f lidar=%s frame=%dx%d",
                             det.confidence, det.center_x, area_ratio, offset, dist_str, w, h)
 
-                # ── Step 5: 到达判定（相机 + LiDAR 双重确认）──
-                # 相机确认锥桶在画面里够大（视觉上很近）
-                # LiDAR 确认前方有近距离障碍物（物理上很近）
-                # 两者同时满足才算到达，单独一个不够
+                # ── Step 5: 到达判定 ──
+                # LiDAR 有效时：相机 + LiDAR 双重确认
+                # LiDAR 失效（None 或过期）时：退回纯视觉判定
                 camera_close = area_ratio >= self.config.arrive_area_ratio
-                lidar_close = lidar_dist is not None and lidar_dist < self.config.arrive_distance_m
 
-                if camera_close and lidar_close:
-                    logger.info("已到达锥桶前方 (area_ratio=%.3f, LiDAR=%.2fm)",
-                                area_ratio, lidar_dist)
-                    return True
-
-                # 只满足一个条件时提示，但继续走
-                if camera_close and not lidar_close:
-                    logger.info("相机认为够近但 LiDAR 还有距离 (lidar=%s)，继续走", dist_str)
-                if lidar_close and not camera_close:
-                    logger.info("LiDAR 认为够近但相机面积不够 (area=%.3f)，继续走", area_ratio)
+                if lidar_dist is not None:
+                    # LiDAR 有效
+                    lidar_close = lidar_dist < self.config.arrive_distance_m
+                    if camera_close and lidar_close:
+                        logger.info("已到达锥桶前方 (area_ratio=%.3f, LiDAR=%.2fm)",
+                                    area_ratio, lidar_dist)
+                        return True
+                    if camera_close and not lidar_close:
+                        logger.info("相机够近但 LiDAR=%.2fm，继续走", lidar_dist)
+                    if lidar_close and not camera_close:
+                        logger.info("LiDAR 够近但相机面积 %.3f，继续走", area_ratio)
+                else:
+                    # LiDAR 失效，退回纯视觉
+                    if camera_close:
+                        logger.info("已到达锥桶前方 (area_ratio=%.3f, LiDAR失效，纯视觉判定)", area_ratio)
+                        return True
 
                 # ── Step 6: 计算速度和转向，写入共享变量 ──
                 # LiDAR 可用时按距离减速，否则按面积
@@ -484,7 +488,16 @@ class ConeDemo:
             yaw_before = self.odom.get_pose().yaw
             target_turn = 2.1  # 120° ≈ 2.1 rad
             turned = 0.0
+            turn_deadline = time.monotonic() + 10.0  # 转身超时 10 秒
             while abs(turned) < target_turn:
+                # 超时保护
+                if time.monotonic() > turn_deadline:
+                    logger.warning("转身超时（10秒），已转 %.1f°，继续", math.degrees(turned))
+                    break
+                # 里程计新鲜度检查：yaw 停止更新就退出
+                if not self.odom.is_fresh(1.0):
+                    logger.warning("里程计数据过期，停止转身")
+                    break
                 self.nav.move(0.0, 0.0, -self.config.scan_speed)
                 time.sleep(0.05)
                 yaw_now = self.odom.get_pose().yaw
