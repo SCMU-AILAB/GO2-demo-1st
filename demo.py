@@ -24,6 +24,7 @@ from enum import Enum
 # vision/:    YOLO 锥桶检测
 from config import DemoConfig
 from motion.camera import Go2Camera
+from motion.lidar import Go2Lidar
 from motion.navigator import Go2Navigator
 from motion.odometry import Go2Odometry, Pose2D
 from vision.detector import ConeYoloDetector
@@ -63,14 +64,16 @@ class ConeDemo:
         """
         self.config = config
 
-        # 四个核心子模块，各自封装了 unitree_sdk2_cpp 的对应功能：
+        # 五个核心子模块，各自封装了 unitree_sdk2_cpp 的对应功能：
         #   camera  — VideoClient.get_image_sample() 拍 JPEG，解码为 OpenCV 帧
         #   nav     — SportClient.move() 发速度、stand_up/stand_down 等
         #   odom    — 订阅 rt/sportmodestate，实时读 x/y/yaw
+        #   lidar   — 订阅 rt/utlidar/cloud，测前方障碍物距离
         #   detector — YOLO 模型，输入 BGR 帧，输出锥桶检测列表
         self.camera = Go2Camera(config.interface, config.domain_id)
         self.nav = Go2Navigator(config.interface, config.domain_id)
         self.odom = Go2Odometry(config.interface, config.domain_id)
+        self.lidar = Go2Lidar(config.interface, config.domain_id)
         self.detector = ConeYoloDetector(config.model_path, config.conf_threshold)
 
         # 起始位姿，start() 里会赋值。None 表示还没记住。
@@ -101,10 +104,19 @@ class ConeDemo:
         logger.info("初始化里程计...")
         self.odom.start()         # 内部会调用 channel.initialize() + ChannelSubscriber.init_channel()
 
+        logger.info("初始化激光雷达...")
+        self.lidar.start()        # 订阅 rt/utlidar/cloud 点云
+
         # 里程计是异步的，订阅后需要等第一条消息到达
         # 5 秒还没收到说明网卡名错了或机器人没开机
         if not self.odom.wait_for_odometry(5.0):
             raise RuntimeError("5秒内未收到里程计数据")
+
+        if not self.lidar.wait_for_data(5.0):
+            logger.warning("5秒内未收到点云数据，LiDAR 测距不可用，将退回面积判定")
+        else:
+            d = self.lidar.get_front_distance()
+            logger.info("LiDAR 就绪，前方距离: %s", f"{d:.2f}m" if d else "无数据")
 
         # 记住起始位置，最后一步要导航回来
         self.home_pose = self.odom.get_pose()
@@ -123,6 +135,7 @@ class ConeDemo:
         except Exception:
             pass                  # 即使停止失败也要继续清理
         self.camera.stop()        # 释放 VideoClient 和 DDS
+        self.lidar.stop()         # 关闭点云订阅
         self.odom.stop()          # 关闭订阅，释放 DDS
 
     # ──────────────────────────────────────────────
@@ -275,18 +288,32 @@ class ConeDemo:
                 # ── Step 4: 计算指标 ──
                 area_ratio = det.area / max(1.0, w * h)
                 offset = det.offset_x_ratio(w)
-                logger.info("检测成功: conf=%.2f center_x=%.0f area_ratio=%.3f offset=%.2f frame=%dx%d",
-                            det.confidence, det.center_x, area_ratio, offset, w, h)
+
+                # LiDAR 前方距离（异步更新，可能为 None）
+                lidar_dist = self.lidar.get_front_distance()
+                dist_str = f"{lidar_dist:.2f}m" if lidar_dist is not None else "N/A"
+                logger.info("检测: conf=%.2f center_x=%.0f area_ratio=%.3f offset=%.2f lidar=%s frame=%dx%d",
+                            det.confidence, det.center_x, area_ratio, offset, dist_str, w, h)
 
                 # ── Step 5: 到达判定 ──
-                if area_ratio >= self.config.arrive_area_ratio:
-                    logger.info("已到达锥桶前方 (area_ratio=%.3f)", area_ratio)
+                # 优先用 LiDAR 距离，不可用时退回面积判定
+                if lidar_dist is not None and lidar_dist < self.config.arrive_distance_m:
+                    logger.info("已到达锥桶前方 (LiDAR=%.2fm < %.2fm)",
+                                lidar_dist, self.config.arrive_distance_m)
+                    return True
+                if lidar_dist is None and area_ratio >= self.config.arrive_area_ratio:
+                    logger.info("已到达锥桶前方 (area_ratio=%.3f, LiDAR不可用)", area_ratio)
                     return True
 
                 # ── Step 6: 计算速度和转向，写入共享变量 ──
+                # LiDAR 可用时按距离减速，否则按面积
                 speed = self.config.normal_speed
-                if area_ratio >= self.config.near_area_ratio:
-                    speed = self.config.slow_speed
+                if lidar_dist is not None:
+                    if lidar_dist < self.config.lidar_slow_distance_m:
+                        speed = self.config.slow_speed
+                else:
+                    if area_ratio >= self.config.near_area_ratio:
+                        speed = self.config.slow_speed
 
                 turn = 0.0
                 if abs(offset) > self.config.center_deadband:
