@@ -15,15 +15,15 @@ class DemoConfig:
 
     # 视觉伺服参数
     center_deadband: float = 0.15    # 画面中心死区 [-1, 1]
-    arrive_area_ratio: float = 0.10  # 到达判定：bbox 面积 / 画面面积
+    arrive_area_ratio: float = 0.13  # 到达判定（0.10 停得太远，实测能到 0.12+）
     near_area_ratio: float = 0.08    # 开始减速的面积比例
     vision_expiry: float = 0.5       # 视觉结果有效期（秒），过期后运动线程自动停车
 
     # 速度限制
     normal_speed: float = 0.40       # m/s
     slow_speed: float = 0.20         # m/s
-    turn_speed: float = 0.30         # rad/s
-    scan_speed: float = 0.20         # 原地扫描转速
+    turn_speed: float = 0.30         # rad/s（边走边转）
+    scan_speed: float = 0.50         # rad/s（纯旋转，0.20 太慢转不动）
 
     # 里程计导航
     odom_threshold: float = 0.30     # 到达判定距离（米）
