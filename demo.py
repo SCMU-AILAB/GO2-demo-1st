@@ -85,8 +85,13 @@ class ConeDemo:
     #  视觉相关
     # ──────────────────────────────────────────────
 
-    def _find_cone_in_frame(self):
+    def _find_cone_in_frame(self, target_cx: float | None = None):
         """拍一帧照片，用 YOLO 检测锥桶。
+
+        参数：
+            target_cx: 目标锁定 — 传入上次目标的 center_x，
+                       选离它最近的检测结果，而不是置信度最高的。
+                       防止画面里有两个锥桶时来回跳。
 
         返回三元组 (detection, frame_width, frame_height)。
         """
@@ -94,7 +99,18 @@ class ConeDemo:
         if frame is None:
             return None, 0, 0
         h, w = frame.shape[:2]
-        det = self.detector.detect_best(frame)
+
+        if target_cx is not None:
+            # 锁定模式：选离 target_cx 最近的检测
+            detections = self.detector.detect(frame)
+            detections = [d for d in detections if d.confidence >= self.config.conf_threshold]
+            if not detections:
+                return None, w, h
+            det = min(detections, key=lambda d: abs(d.center_x - target_cx))
+        else:
+            # 无锁定：选置信度最高的
+            det = self.detector.detect_best(frame)
+
         return det, w, h
 
     def scan_for_cone(self, direction: float = 1.0, timeout: float = 20.0) -> bool:
@@ -132,19 +148,14 @@ class ConeDemo:
         left_cone = min(detections, key=lambda d: d.center_x)
         return left_cone
 
-    def approach_cone(self, timeout: float = 20.0) -> bool:
+    def approach_cone(self, timeout: float = 20.0, target_cx: float | None = None) -> bool:
         """视觉伺服走向锥桶，直到足够近。
 
-        双线程架构：
-            运动线程（50Hz）：持续发 move()，独立检查视觉有效期
-            视觉线程（慢）：  拍照 → YOLO → 更新速度/转向 + 时间戳
-
-        视觉有效期机制：
-            成功检测时刷新 last_seen 时间戳
-            单次失败不清零、不刷新，短暂复用上次指令
-            运动线程发现超过有效期（默认 0.5 秒）立即停车
+        参数：
+            timeout: 最长接近秒数
+            target_cx: 目标锥桶的初始 center_x，用于锁定跟踪防止跳变
         """
-        logger.info("走向锥桶...")
+        logger.info("走向锥桶 (target_cx=%s)...", f"{target_cx:.0f}" if target_cx else "无锁定")
 
         vision_expiry = self.config.vision_expiry
 
@@ -175,10 +186,12 @@ class ConeDemo:
         motion_thread.start()
 
         deadline = time.monotonic() + timeout
+        # 锁定目标的 center_x，会随检测结果缓慢更新
+        locked_cx = target_cx
         try:
             while time.monotonic() < deadline:
-                # ── Step 1: 拍照检测 ──
-                det, w, h = self._find_cone_in_frame()
+                # ── Step 1: 拍照检测（锁定目标）──
+                det, w, h = self._find_cone_in_frame(target_cx=locked_cx)
 
                 # ── Step 2: 检测失败 → 保持上次指令 ──
                 if det is None:
@@ -186,8 +199,13 @@ class ConeDemo:
                     time.sleep(0.1)
                     continue
 
-                # ── Step 3: 检测成功 → 刷新时间戳 ──
+                # ── Step 3: 检测成功 → 刷新时间戳 + 更新锁定位置 ──
                 cmd["last_seen"] = time.monotonic()
+                # 缓慢更新锁定位置（0.3 旧值 + 0.7 新值），跟随锥桶移动
+                if locked_cx is not None:
+                    locked_cx = 0.3 * locked_cx + 0.7 * det.center_x
+                else:
+                    locked_cx = det.center_x
 
                 # ── Step 4: 计算指标 ──
                 area_ratio = det.area / max(1.0, w * h)
@@ -296,7 +314,7 @@ class ConeDemo:
                 return 1
             logger.info("左侧锥桶: center_x=%.0f conf=%.2f",
                         left_cone.center_x, left_cone.confidence)
-            if not self.approach_cone():
+            if not self.approach_cone(target_cx=left_cone.center_x):
                 return 1
             self.cones_found += 1
             logger.info("锥桶 A 完成 (%d/2)", self.cones_found)
@@ -334,7 +352,10 @@ class ConeDemo:
 
             if not self.scan_for_cone(direction=-1.0):
                 return 1
-            if not self.approach_cone():
+            # 扫描成功后拍一帧，获取锥桶 B 的 center_x 用于锁定
+            det_b, _, _ = self._find_cone_in_frame()
+            target_b = det_b.center_x if det_b else None
+            if not self.approach_cone(target_cx=target_b):
                 return 1
             self.cones_found += 1
             logger.info("锥桶 B 完成 (%d/2)", self.cones_found)
