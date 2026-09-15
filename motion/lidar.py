@@ -30,29 +30,33 @@ class Go2Lidar:
             try:
                 data = np.frombuffer(bytes(msg.data), dtype=np.uint8)
                 pts = data.reshape(msg.width, msg.point_step)
-                # 取 x, y, z 字段（offset 0, 4, 8，float32）
                 xyz = pts[:, 0:12].view(np.float32).reshape(-1, 3)
                 x = xyz[:, 0]
                 y = xyz[:, 1]
                 z = xyz[:, 2]
 
-                # 过滤掉狗自身的几何体和地面：
-                #   x > 0.5  — 太近的是狗自己的腿/身体
-                #   |y| < 0.4 — 大致正前方的锥形区域
-                #   -0.3 < z < 0.5 — 排除地面（z太低）和过高点
-                front_mask = (
-                    (x > 0.5)
+                # 径向距离：排除狗自身几何体（LiDAR 在头顶，身体在半径 0.5m 内）
+                radial = np.sqrt(x**2 + y**2 + z**2)
+
+                # 前方锥形区域的真实障碍物：
+                #   radial > 0.5  — 排除自身（球形，不只看 x）
+                #   x > 0.3       — 确实在前方
+                #   |y| < 0.4     — 大致正前方
+                #   -0.3 < z < 0.5 — 排除地面和过高点
+                mask = (
+                    (radial > 0.5)
+                    & (x > 0.3)
                     & (np.abs(y) < 0.4)
                     & (z > -0.3)
                     & (z < 0.5)
                 )
-                if not np.any(front_mask):
+                if not np.any(mask):
                     with self._lock:
                         self._front_distance = None
                     self._got_first.set()
                     return
 
-                dist = np.sqrt(x[front_mask] ** 2 + y[front_mask] ** 2)
+                dist = np.sqrt(x[mask] ** 2 + y[mask] ** 2)
                 with self._lock:
                     self._front_distance = float(np.min(dist))
                 self._got_first.set()

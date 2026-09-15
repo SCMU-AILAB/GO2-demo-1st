@@ -250,11 +250,16 @@ class ConeDemo:
         }
 
         def motion_loop():
-            """运动线程：50Hz 发 move，独立检查视觉有效期。"""
+            """运动线程：50Hz 发 move，独立检查视觉有效期和安全距离。"""
             first_cmd_logged = False
             while cmd["running"]:
-                # 有效期检查：即使视觉线程卡死，这里也能停车
-                if time.monotonic() - cmd["last_seen"] > vision_expiry:
+                # 安全停车：LiDAR 检测到极近距离障碍，不管相机状态，立即停
+                lidar_dist = self.lidar.get_front_distance()
+                if lidar_dist is not None and lidar_dist < 0.15:
+                    logger.warning("安全停车: LiDAR=%.2fm < 0.15m", lidar_dist)
+                    self.nav.move(0.0, 0.0, 0.0)
+                # 视觉有效期检查：即使视觉线程卡死，这里也能停车
+                elif time.monotonic() - cmd["last_seen"] > vision_expiry:
                     logger.warning("视觉结果过期 (%.1fs 未更新)，停车", vision_expiry)
                     self.nav.move(0.0, 0.0, 0.0)
                 else:
@@ -295,15 +300,23 @@ class ConeDemo:
                 logger.info("检测: conf=%.2f center_x=%.0f area_ratio=%.3f offset=%.2f lidar=%s frame=%dx%d",
                             det.confidence, det.center_x, area_ratio, offset, dist_str, w, h)
 
-                # ── Step 5: 到达判定 ──
-                # 优先用 LiDAR 距离，不可用时退回面积判定
-                if lidar_dist is not None and lidar_dist < self.config.arrive_distance_m:
-                    logger.info("已到达锥桶前方 (LiDAR=%.2fm < %.2fm)",
-                                lidar_dist, self.config.arrive_distance_m)
+                # ── Step 5: 到达判定（相机 + LiDAR 双重确认）──
+                # 相机确认锥桶在画面里够大（视觉上很近）
+                # LiDAR 确认前方有近距离障碍物（物理上很近）
+                # 两者同时满足才算到达，单独一个不够
+                camera_close = area_ratio >= self.config.arrive_area_ratio
+                lidar_close = lidar_dist is not None and lidar_dist < self.config.arrive_distance_m
+
+                if camera_close and lidar_close:
+                    logger.info("已到达锥桶前方 (area_ratio=%.3f, LiDAR=%.2fm)",
+                                area_ratio, lidar_dist)
                     return True
-                if lidar_dist is None and area_ratio >= self.config.arrive_area_ratio:
-                    logger.info("已到达锥桶前方 (area_ratio=%.3f, LiDAR不可用)", area_ratio)
-                    return True
+
+                # 只满足一个条件时提示，但继续走
+                if camera_close and not lidar_close:
+                    logger.info("相机认为够近但 LiDAR 还有距离 (lidar=%s)，继续走", dist_str)
+                if lidar_close and not camera_close:
+                    logger.info("LiDAR 认为够近但相机面积不够 (area=%.3f)，继续走", area_ratio)
 
                 # ── Step 6: 计算速度和转向，写入共享变量 ──
                 # LiDAR 可用时按距离减速，否则按面积
@@ -465,8 +478,17 @@ class ConeDemo:
             time.sleep(1.0)   # 在锥桶前停 1 秒，稳定一下
 
             # ── Phase 3: 找锥桶 B 并走过去 ──
-            # 向右旋转扫描 → 发现第二个锥桶 → 走过去
+            # 先转身背对 A（向右转 120°），避免把 A 误认为 B
+            # 然后继续向右扫描找真正的 B
             logger.info("=== 第二个锥桶 ===")
+            logger.info("先转身背对锥桶 A...")
+            turn_start = time.monotonic()
+            while time.monotonic() - turn_start < 2.5:   # 转约 120°
+                self.nav.move(0.0, 0.0, -self.config.scan_speed)
+                time.sleep(0.05)
+            self.nav.stop()
+            time.sleep(0.5)
+
             if not self.scan_for_cone(direction=-1.0):
                 return 1
             if not self.approach_cone():
