@@ -53,5 +53,5 @@ python demo.py -n eth0 --conf 0.5
 
 ## 来源
 
-视觉检测代码提取自 `国赛` 项目的 `obstacle_avoidance/cone_detector_yolo.py`，
+视觉检测代码提取自 `中国智能机器人创意大赛` 项目的 `obstacle_avoidance/cone_detector_yolo.py`，
 去掉了 ROS2/RealSense/UDP 依赖，适配 Go2 SDK2 直接调用。
