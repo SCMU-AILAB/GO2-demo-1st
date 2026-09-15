@@ -488,21 +488,27 @@ class ConeDemo:
             yaw_before = self.odom.get_pose().yaw
             target_turn = 2.1  # 120° ≈ 2.1 rad
             turned = 0.0
-            turn_deadline = time.monotonic() + 10.0  # 转身超时 10 秒
+            turn_ok = True
+            # 2.1rad / 0.20rad/s = 10.5s，超时给 18 秒（1.7 倍余量）
+            turn_deadline = time.monotonic() + 18.0
             while abs(turned) < target_turn:
-                # 超时保护
                 if time.monotonic() > turn_deadline:
-                    logger.warning("转身超时（10秒），已转 %.1f°，继续", math.degrees(turned))
+                    logger.warning("转身超时（18秒），已转 %.1f°", math.degrees(turned))
+                    turn_ok = False
                     break
-                # 里程计新鲜度检查：yaw 停止更新就退出
                 if not self.odom.is_fresh(1.0):
                     logger.warning("里程计数据过期，停止转身")
+                    turn_ok = False
                     break
                 self.nav.move(0.0, 0.0, -self.config.scan_speed)
                 time.sleep(0.05)
                 yaw_now = self.odom.get_pose().yaw
                 turned = abs(self._normalize_angle(yaw_now - yaw_before))
             self.nav.stop()
+
+            if not turn_ok:
+                logger.error("转身失败，无法可靠区分锥桶 A 和 B，中止")
+                return 1
             logger.info("转身完成，共转了 %.1f°", math.degrees(turned))
             time.sleep(0.5)
 
