@@ -30,13 +30,22 @@ class Go2Lidar:
             try:
                 data = np.frombuffer(bytes(msg.data), dtype=np.uint8)
                 pts = data.reshape(msg.width, msg.point_step)
-                # 取 x, y 字段（offset 0 和 4，float32）
-                xy = pts[:, 0:8].view(np.float32).reshape(-1, 2)
-                x = xy[:, 0]
-                y = xy[:, 1]
+                # 取 x, y, z 字段（offset 0, 4, 8，float32）
+                xyz = pts[:, 0:12].view(np.float32).reshape(-1, 3)
+                x = xyz[:, 0]
+                y = xyz[:, 1]
+                z = xyz[:, 2]
 
-                # 前方锥形区域：x > 0（前方）且 |y| < 0.3m（大致正前方）
-                front_mask = (x > 0.05) & (np.abs(y) < 0.3)
+                # 过滤掉狗自身的几何体和地面：
+                #   x > 0.5  — 太近的是狗自己的腿/身体
+                #   |y| < 0.4 — 大致正前方的锥形区域
+                #   -0.3 < z < 0.5 — 排除地面（z太低）和过高点
+                front_mask = (
+                    (x > 0.5)
+                    & (np.abs(y) < 0.4)
+                    & (z > -0.3)
+                    & (z < 0.5)
+                )
                 if not np.any(front_mask):
                     with self._lock:
                         self._front_distance = None
