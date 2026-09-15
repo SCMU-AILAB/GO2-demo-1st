@@ -214,9 +214,15 @@ class ConeDemo:
                             det.confidence, det.center_x, area_ratio, offset, w, h)
 
                 # ── Step 5: 到达判定（纯视觉）──
-                if area_ratio >= self.config.arrive_area_ratio:
-                    logger.info("已到达锥桶前方 (area_ratio=%.3f)", area_ratio)
+                # 要求面积够大 AND 锥桶大致居中（offset 在死区内）
+                # 只看面积不够：锥桶在画面边缘时 bbox 也可能很大
+                area_ok = area_ratio >= self.config.arrive_area_ratio
+                centered = abs(offset) <= self.config.center_deadband
+                if area_ok and centered:
+                    logger.info("已到达锥桶前方 (area_ratio=%.3f, offset=%.2f)", area_ratio, offset)
                     return True
+                if area_ok and not centered:
+                    logger.info("面积够大但未居中 (offset=%.2f)，继续转向", offset)
 
                 # ── Step 6: 计算速度和转向 ──
                 speed = self.config.normal_speed
@@ -248,12 +254,23 @@ class ConeDemo:
         """用里程计导航到目标坐标。"""
         logger.info("导航到 %s (%.2f, %.2f)", label, target.x, target.y)
         deadline = time.monotonic() + self.config.odom_timeout
+        step = 0
 
         while time.monotonic() < deadline:
+            if not self.odom.is_fresh(1.0):
+                logger.warning("里程计数据过期，导航中止")
+                self.nav.stop()
+                return False
+
             pose = self.odom.get_pose()
             dx = target.x - pose.x
             dy = target.y - pose.y
             dist = math.hypot(dx, dy)
+
+            step += 1
+            if step % 10 == 0:  # 每秒打一次（100ms 循环）
+                logger.info("导航中: 当前(%.2f, %.2f) 目标(%.2f, %.2f) 距离=%.2fm yaw=%.2f",
+                            pose.x, pose.y, target.x, target.y, dist, pose.yaw)
 
             if dist < self.config.odom_threshold:
                 logger.info("已到达 %s", label)
