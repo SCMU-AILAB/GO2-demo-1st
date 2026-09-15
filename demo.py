@@ -478,15 +478,19 @@ class ConeDemo:
             time.sleep(1.0)   # 在锥桶前停 1 秒，稳定一下
 
             # ── Phase 3: 找锥桶 B 并走过去 ──
-            # 先转身背对 A（向右转 120°），避免把 A 误认为 B
-            # 然后继续向右扫描找真正的 B
+            # 先转身背对 A（用里程计 yaw 控制转约 120°），避免把 A 误认为 B
             logger.info("=== 第二个锥桶 ===")
             logger.info("先转身背对锥桶 A...")
-            turn_start = time.monotonic()
-            while time.monotonic() - turn_start < 2.5:   # 转约 120°
+            yaw_before = self.odom.get_pose().yaw
+            target_turn = 2.1  # 120° ≈ 2.1 rad
+            turned = 0.0
+            while abs(turned) < target_turn:
                 self.nav.move(0.0, 0.0, -self.config.scan_speed)
                 time.sleep(0.05)
+                yaw_now = self.odom.get_pose().yaw
+                turned = abs(self._normalize_angle(yaw_now - yaw_before))
             self.nav.stop()
+            logger.info("转身完成，共转了 %.1f°", math.degrees(turned))
             time.sleep(0.5)
 
             if not self.scan_for_cone(direction=-1.0):
